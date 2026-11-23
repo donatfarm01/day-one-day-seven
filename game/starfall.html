@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Starfall — Day 1 vs Day 7</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #191419; height: 100%; overflow: hidden; }
+  #wrap { position: relative; width: 100vw; height: 100vh; max-width: 540px; margin: 0 auto; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #hud { position: absolute; left: 0; right: 0; top: 10px; text-align: center;
+         font-family: monospace; color: #fff; font-size: 14px; pointer-events: none; }
+  #hud b { color: #ffd166; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="540" height="960"></canvas>
+  <div id="hud">STARFALL &middot; <b id="modeLabel"></b> &middot; arrows / drag to move</div>
+</div>
+<script>
+// Starfall — the tiny arcade catcher from the "Day one, day seven" video.
+// ?day=1  -> the day-one build: grey sky, one star at a time, no extras.
+// ?day=7  -> the day-seven build (default): night sky, coins, combos,
+//            shields, particles and a LEVEL 2 banner.
+const params = new URLSearchParams(location.search);
+const day = params.get("day") === "1" ? 1 : 7;
+const day7 = day === 7;
+document.getElementById("modeLabel").textContent = day7 ? "DAY 7" : "DAY 1";
+
+const cv = document.getElementById("game");
+const ctx = cv.getContext("2d");
+const W = 540, H = 960, GROUND = 900;
+
+let seed = 1337;
+function rnd() { seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }
+
+const state = {
+  score: 0, combo: 0, bestCombo: 0, hearts: 3, shield: false,
+  stars: [], parts: [], spawnT: 0, spawnCount: 0, bannerT: 0,
+  shieldSpawned: false, over: false, t: 0,
+};
+// Background starfield (day 7 only)
+const sky = [];
+for (let i = 0; i < 140; i++)
+  sky.push({ x: rnd() * W, y: rnd() * H, r: 1 + rnd() * 2, ph: rnd() * 6.28, sp: 1 + rnd() * 2 });
+const clouds = [];
+for (let i = 0; i < 3; i++)
+  clouds.push({ x: rnd() * W, y: 150 + rnd() * 500, rx: 130 + rnd() * 90, ry: 36 + rnd() * 18, sp: 8 + rnd() * 8 });
+
+const basket = { x: W / 2, w: 120, target: null };
+const basketY = 850;
+
+function spawn(kind, x) {
+  const speed = day7 ? 520 + rnd() * 220 : 430;
+  state.stars.push({
+    x: x !== undefined ? x : 90 + rnd() * (W - 180),
+    y: -30, vy: speed, kind: kind || "star",
+    ph: rnd() * 6.28, sway: day7 ? 30 + rnd() * 30 : 20 + rnd() * 20,
+  });
+}
+const SHARED = [
+  { t: 0.6, x: 350 }, { t: 1.8, x: 720 }, { t: 3.0, x: 240 },
+];
+function update(dt) {
+  state.t += dt;
+  if (state.over) return;
+  // scheduled spawns (the first three are identical in both builds)
+  for (const s of SHARED) {
+    if (state.t >= s.t && !s.done) { s.done = true; spawn("star", s.x); state.spawnCount++; }
+  }
+  if (state.t > 3.2) {
+    state.spawnT -= dt;
+    const maxC = day7 ? 5 : 1;
+    if (state.spawnT <= 0 && state.stars.length < maxC) {
+      state.spawnCount++;
+      spawn(state.spawnCount % 5 === 0 && day7 ? "coin" : "star");
+      state.spawnT = day7 ? 0.34 : 1.0;
+    }
+  }
+  if (day7 && state.t >= 14 && state.bannerT < 2.5) state.bannerT += dt;
+  if (day7 && state.t >= 19 && !state.shieldSpawned) {
+    state.shieldSpawned = true; spawn("shield", basket.x);
+  }
+  // basket follows the pointer / keys
+  if (basket.target !== null) {
+    const dx = basket.target - basket.x;
+    const maxStep = (day7 ? 900 : 500) * dt;
+    basket.x += Math.max(-maxStep, Math.min(maxStep, dx));
+  }
+  basket.x = Math.max(basket.w / 2 + 10, Math.min(W - basket.w / 2 - 10, basket.x));
+  // stars
+  for (const s of state.stars) {
+    s.y += s.vy * dt;
+    if (s.y > basketY - 10 && s.y < basketY + 30 &&
+        Math.abs(s.x + Math.sin(state.t * 2 + s.ph) * s.sway * 0.25 - basket.x) < basket.w / 2 + 12) {
+      s.caught = true;
+      if (s.kind === "coin") { state.score += 50; }
+      else if (s.kind === "shield") { state.shield = true; }
+      else {
+        state.combo = Math.min(state.combo + 1, 8);
+        state.bestCombo = Math.max(state.bestCombo, state.combo);
+        state.score += 10 * state.combo;
+      }
+      burst(s.x, s.y, s.kind === "star" ? "#ffd166" : "#4cc9f0");
+    } else if (s.y > GROUND) {
+      s.missed = true;
+      if (s.kind === "star") {
+        if (state.shield) { state.shield = false; }
+        else { state.hearts--; state.combo = 0; }
+      }
+    }
+  }
+  state.stars = state.stars.filter(s => !s.caught && !s.missed);
+  for (const p of state.parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 300 * dt; p.life -= dt; }
+  state.parts = state.parts.filter(p => p.life > 0);
+  if (state.hearts <= 0) state.over = true;
+}
+function burst(x, y, color) {
+  for (let i = 0; i < 10; i++) {
+    const a = rnd() * 6.28, sp = 60 + rnd() * 160;
+    state.parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60,
+                       life: 0.4 + rnd() * 0.4, color });
+  }
+}
+function diamond(x, y, r, color, core) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y);
+  ctx.closePath(); ctx.fill();
+  if (core) { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(x, y, r * 0.32, 0, 6.29); ctx.fill(); }
+}
+function draw() {
+  // sky
+  if (day7) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#1b1038"); g.addColorStop(0.55, "#2a1b4d"); g.addColorStop(1, "#3a2358");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    for (const s of sky) {
+      ctx.globalAlpha = 0.4 + 0.6 * Math.abs(Math.sin(state.t * s.sp + s.ph));
+      ctx.fillStyle = "#fff"; ctx.fillRect(s.x, s.y, s.r, s.r);
+    }
+    ctx.globalAlpha = 1;
+    for (const c of clouds) {
+      c.x += c.sp * 0.016; if (c.x - c.rx > W) c.x = -c.rx;
+      ctx.fillStyle = "rgba(255,255,255,0.05)";
+      ctx.beginPath(); ctx.ellipse(c.x, c.y, c.rx, c.ry, 0, 0, 6.29); ctx.fill();
+    }
+  } else {
+    ctx.fillStyle = "#23272e"; ctx.fillRect(0, 0, W, H);
+  }
+  ctx.fillStyle = day7 ? "#4a2d63" : "#2b2f36"; ctx.fillRect(0, GROUND, W, H - GROUND);
+  // stars / coins / shield
+  for (const s of state.stars) {
+    const x = s.x + Math.sin(state.t * 2 + s.ph) * s.sway * 0.25;
+    if (s.kind === "coin") {
+      ctx.fillStyle = "#ffd166"; ctx.beginPath(); ctx.arc(x, s.y, 19, 0, 6.29); ctx.fill();
+      ctx.fillStyle = "#b8860b"; ctx.beginPath(); ctx.arc(x, s.y, 11, 0, 6.29); ctx.fill();
+    } else if (s.kind === "shield") {
+      ctx.fillStyle = "#4cc9f0"; ctx.beginPath(); ctx.arc(x, s.y, 18, 0, 6.29); ctx.fill();
+      ctx.fillStyle = "#fff"; ctx.font = "bold 20px monospace"; ctx.textAlign = "center";
+      ctx.fillText("S", x, s.y + 7);
+    } else {
+      ctx.globalAlpha = 0.10; ctx.fillStyle = "#ffd166";
+      ctx.beginPath(); ctx.arc(x, s.y, 32, 0, 6.29); ctx.fill(); ctx.globalAlpha = 1;
+      diamond(x, s.y, 21, day7 ? "#ffd166" : "#ffffff", true);
+    }
+  }
+  // particles
+  for (const p of state.parts) {
+    ctx.globalAlpha = Math.max(0, p.life * 2);
+    ctx.fillStyle = p.color; ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+  // basket (trapezoid + rim + slats)
+  const bx = basket.x, bw = basket.w;
+  ctx.fillStyle = day7 ? "#ffd166" : "#e8e8e8";
+  ctx.beginPath();
+  ctx.moveTo(bx - bw / 2, basketY - 14); ctx.lineTo(bx + bw / 2, basketY - 14);
+  ctx.lineTo(bx + bw / 2 - 14, basketY + 22); ctx.lineTo(bx - bw / 2 + 14, basketY + 22);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = day7 ? "#e0a92e" : "#c9c9c9";
+  ctx.fillRect(bx - bw / 2, basketY - 18, bw, 6);
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  for (const off of [-bw / 4, 0, bw / 4]) ctx.fillRect(bx + off - 2, basketY - 8, 4, 24);
+  if (state.shield) {
+    ctx.strokeStyle = "#4cc9f0"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(bx, basketY, bw / 2 + 12, 0, 6.29); ctx.stroke();
+  }
+  // HUD
+  ctx.textAlign = "left"; ctx.fillStyle = "#fff"; ctx.font = "bold 28px monospace";
+  ctx.fillText("SCORE " + String(state.score).padStart(3, "0"), 20, 50);
+  ctx.fillStyle = "#ff4d6d";
+  for (let h = 0; h < 3; h++) {
+    const hx = 420 + h * 32, hy = 40;
+    ctx.beginPath(); ctx.arc(hx, hy, 7, 0, 6.29); ctx.arc(hx + 12, hy, 7, 0, 6.29); ctx.fill();
+    ctx.fillRect(hx, hy + 2, 12, 8);
+    if (h >= state.hearts) { ctx.fillStyle = "#3a3a3a"; }
+  }
+  if (day7 && state.combo >= 2) {
+    ctx.fillStyle = "#ffd166"; ctx.textAlign = "center"; ctx.font = "bold 24px monospace";
+    ctx.fillText("COMBO x" + state.combo, W / 2, 92);
+  }
+  if (day7 && state.bannerT > 0 && state.bannerT < 2.5) {
+    const slide = Math.max(0, (0.35 - state.bannerT)) * -400;
+    ctx.fillStyle = "#191419"; ctx.fillRect(70, 400, 400, 110);
+    ctx.fillStyle = "#ffd166"; ctx.textAlign = "center"; ctx.font = "bold 52px monospace";
+    ctx.fillText("LEVEL 2", W / 2 + slide, 445);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 26px monospace";
+    ctx.fillText("DOUBLE STARS", W / 2 + slide, 485);
+  }
+  if (state.over) {
+    ctx.fillStyle = "rgba(0,0,0,0.7)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.font = "bold 44px monospace";
+    ctx.fillText("GAME OVER", W / 2, 430);
+    ctx.font = "bold 24px monospace";
+    ctx.fillText("SCORE " + state.score + "  ·  BEST COMBO x" + state.bestCombo, W / 2, 480);
+    ctx.fillStyle = "#ffd166"; ctx.font = "20px monospace";
+    ctx.fillText("tap to play again", W / 2, 530);
+  }
+}
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+function pointerX(e) {
+  const r = cv.getBoundingClientRect();
+  return (e.clientX - r.left) * (W / r.width);
+}
+cv.addEventListener("pointermove", e => { basket.target = pointerX(e); });
+cv.addEventListener("pointerdown", e => {
+  if (state.over) { location.reload(); return; }
+  basket.target = pointerX(e);
+});
+window.addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft") basket.target = basket.x - 120;
+  if (e.key === "ArrowRight") basket.target = basket.x + 120;
+});
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
